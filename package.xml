@@ -5,7 +5,7 @@
 <package format="3">
 
   <name>extra_dof_control</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 
   <description>
     ROS 2 Action interface and Python control utilities for an additional linear DOF.
