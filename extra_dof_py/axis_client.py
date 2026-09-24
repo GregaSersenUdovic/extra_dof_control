@@ -18,12 +18,19 @@ class AxisClient(Node):
             '/extra_dof/move_axis',
         )
 
-    def send_goal(self, target_mm):
+    def send_goal(self, preset_index):
         try:
-            target_mm = float(target_mm)
+            preset_index = int(preset_index)
         except (TypeError, ValueError):
             self.get_logger().error(
-                f'Invalid target value: {target_mm!r}'
+                f'Invalid preset index: {preset_index!r}'
+            )
+            return False
+
+        if preset_index not in (0, 1, 2):
+            self.get_logger().error(
+                f'Invalid preset index {preset_index}. '
+                'Allowed values are 0, 1, 2.'
             )
             return False
 
@@ -38,10 +45,10 @@ class AxisClient(Node):
             return False
 
         goal = MoveAxis.Goal()
-        goal.target_mm = target_mm
+        goal.preset_index = preset_index
 
         self.get_logger().info(
-            f'Sending target: {target_mm:.3f} mm'
+            f'Sending preset: {preset_index}'
         )
 
         future = self._client.send_goal_async(
@@ -102,7 +109,7 @@ def main(args=None):
     node = AxisClient()
 
     try:
-        node.send_goal(168.0)
+        node.send_goal(1)
     finally:
         node.destroy_node()
 

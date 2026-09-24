@@ -1,6 +1,8 @@
 # extra_dof_control
 
-ROS 2 Humble control interface for an additional linear degree of freedom driven by a RevPi-based motor controller.
+ROS 2 Humble Action interface for controlling an additional linear degree of freedom driven by a RevPi-based motor controller.
+
+The Action interface is intentionally limited to **three fixed presets**, corresponding to the three screwdriver positions used by the system. Arbitrary millimetre targets are not exposed through the Action interface.
 
 The system uses:
 
@@ -91,9 +93,7 @@ Raspberry Pi:
 - LA11 encoder service
 ```
 
-Because of this, the old manual commands for starting the Docker containers and ROS nodes are generally **not needed during normal operation**.
-
-The previous manual startup commands are therefore intentionally omitted from this README.
+Because of this, manual Docker/node startup commands are normally **not needed during normal operation**.
 
 To check service status on the RevPi:
 
@@ -121,7 +121,7 @@ extra_dof_control/action/MoveAxis
 Current action definition:
 
 ```text
-float64 target_mm
+uint8 preset_index
 ---
 bool success
 float64 final_position_mm
@@ -131,6 +131,16 @@ float64 current_position_mm
 float64 error_mm
 ```
 
+The Action accepts only preset indices:
+
+```text
+0 -> preset_0
+1 -> preset_1
+2 -> preset_2
+```
+
+Any other preset index is rejected.
+
 ### Motor node topics
 
 ```text
@@ -139,23 +149,13 @@ float64 error_mm
 /revpi_closed_loop_motor_node/preset
 ```
 
-For normal external control, use the **Action interface** rather than publishing directly to the target or preset topics.
+For normal external control, use the **Action interface**. The motor-node topics are low-level interfaces used internally and for diagnostics.
 
 ---
 
-## Action target convention
+## Preset positions
 
-The ActionServer supports both preset indices and direct positions using the existing `target_mm` field.
-
-### Presets
-
-```text
-0 -> preset_0
-1 -> preset_1
-2 -> preset_2
-```
-
-The actual preset positions are stored in the closed-loop motor node.
+The ActionServer does not duplicate the physical preset positions. It reads them from the closed-loop motor node using ROS parameters.
 
 Current defaults:
 
@@ -165,26 +165,32 @@ preset_1 = 168.0 mm
 preset_2 = 277.0 mm
 ```
 
-### Direct targets
-
-Values in the allowed physical range are interpreted directly as millimetres.
-
-Current ActionServer limits:
+The Action flow is:
 
 ```text
-minimum = 46.0 mm
-maximum = 290.0 mm
+preset index
+    ↓
+ActionServer
+    ↓
+read preset_N from the closed-loop motor node
+    ↓
+publish resolved target in mm
+    ↓
+closed-loop motor controller
+    ↓
+LA11 encoder feedback
+    ↓
+Action feedback/result
 ```
 
-Therefore:
+The closed-loop motor node still contains its own minimum and maximum target limits for low-level motor safety:
 
 ```text
-0, 1, 2       -> preset indices
-46 ... 290    -> direct position in mm
-anything else -> rejected
+min_target_mm = 46.0
+max_target_mm = 290.0
 ```
 
-For example, `2.5` is **not** a preset. It is interpreted as `2.5 mm` and rejected because it is below the allowed range.
+These limits are not part of the public Action command interface because the Action accepts presets only.
 
 ---
 
@@ -222,78 +228,69 @@ ROS2CLI_NO_DAEMON=1 ros2 action list -t
 ### Preset 0
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 0}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 0}"   --feedback
 ```
 
 ### Preset 1
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 1}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 1}"   --feedback
 ```
 
 ### Preset 2
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 2}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 2}"   --feedback
 ```
 
-The ROS CLI automatically converts these integer literals to the `float64` `target_mm` field.
-
-### Direct position
-
-Example:
+### Invalid preset rejection test
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 175.0}" \
-  --feedback
-```
-
-### Out-of-range rejection test
-
-```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 400}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 3}"   --feedback
 ```
 
 The goal should be rejected and the motor should not move.
 
 ---
 
+## Action feedback and completion
+
+During a move, the ActionServer publishes:
+
+```text
+current_position_mm
+error_mm
+```
+
+The position is derived from:
+
+```text
+/la11_encoder_node/position_mm
+    ↓
+/revpi_closed_loop_motor_node/position_mm
+    ↓
+ActionServer
+```
+
+The ActionServer reports success only after the measured position remains within its tolerance for multiple consecutive samples.
+
+The server also checks for stale encoder feedback and supports Action cancellation. On cancellation, it commands the current measured position as the new target so the low-level controller stops pursuing the old target.
+
+---
+
 ## Live position monitoring
 
-The closed-loop motor node republishes encoder position on:
+The preferred PC-side position topic is:
 
 ```text
 /revpi_closed_loop_motor_node/position_mm
 ```
 
-From the control PC or RevPi:
+Monitor it with:
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 topic echo \
-  /revpi_closed_loop_motor_node/position_mm \
-  --qos-reliability best_effort
+ROS2CLI_NO_DAEMON=1 ros2 topic echo   /revpi_closed_loop_motor_node/position_mm   --qos-reliability best_effort
 ```
-
-This is the preferred position topic to monitor from the control PC.
 
 The raw LA11 encoder topic is:
 
@@ -317,7 +314,17 @@ Example:
 
 ```python
 client = AxisClient()
-client.send_goal(168.0)
+
+# Move to preset 1
+success = client.send_goal(1)
+```
+
+Valid values are:
+
+```text
+0
+1
+2
 ```
 
 The ActionClient sends commands to:
@@ -330,32 +337,26 @@ The ActionServer runs on the RevPi.
 
 ---
 
-## Building after code changes
 
-### Motor controller package
+## Important: deploying ActionServer changes to the RevPi
 
-Inside the RevPi ROS 2 container:
+The `axis_server.py` file in this repository is the source copy of the ActionServer and is provided for version control, review, and reuse.
 
-```bash
-cd /ros2_ws
-source /opt/ros/humble/setup.bash
+Changing the file on the control PC or on GitHub **does not automatically update the ActionServer that is running on the RevPi**.
 
-colcon build \
-  --packages-select linear_motor \
-  --symlink-install
+For changes to take effect on the physical system, update the RevPi copy:
 
-source install/setup.bash
+```text
+/home/pi/ros2_ws/src/extra_dof_control/extra_dof_py/axis_server.py
 ```
 
-Then on the RevPi host:
+The corresponding path inside the ROS 2 Docker container is:
 
-```bash
-sudo systemctl restart linear-motor.service
+```text
+/ros2_ws/src/extra_dof_control/extra_dof_py/axis_server.py
 ```
 
-### Action package
-
-Inside the RevPi ROS 2 container:
+After changing or copying the server file onto the RevPi, rebuild the package inside the RevPi ROS 2 container:
 
 ```bash
 cd /ros2_ws
@@ -368,10 +369,68 @@ colcon build \
 source install/setup.bash
 ```
 
-Then on the RevPi host:
+Then restart the ActionServer from the RevPi host:
 
 ```bash
 sudo systemctl restart extra-dof-action-server.service
+```
+
+Verify that it is running:
+
+```bash
+sudo systemctl status extra-dof-action-server.service --no-pager -l
+```
+
+The same principle applies to `MoveAxis.action`: because the generated Action interface is used by both the control PC and the RevPi, interface changes must be rebuilt on both systems.
+
+---
+
+## Building after code changes
+
+### Important: Action definition changes
+
+`MoveAxis.action` is used by both the control PC and the RevPi.
+
+If the Action definition changes, rebuild `extra_dof_control` on **both devices** so that the generated ROS interface matches.
+
+### Action package
+
+Inside the ROS 2 workspace:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+
+colcon build   --packages-select extra_dof_control   --symlink-install
+
+source install/setup.bash
+```
+
+On the RevPi, restart the ActionServer afterward:
+
+```bash
+sudo systemctl restart extra-dof-action-server.service
+```
+
+### Motor controller package
+
+Only rebuild `linear_motor` when the motor-node code or configuration changes.
+
+Inside the RevPi ROS 2 container:
+
+```bash
+cd /ros2_ws
+source /opt/ros/humble/setup.bash
+
+colcon build   --packages-select linear_motor   --symlink-install
+
+source install/setup.bash
+```
+
+Then on the RevPi host:
+
+```bash
+sudo systemctl restart linear-motor.service
 ```
 
 A full Docker container restart is normally unnecessary. Restart the relevant `systemd` service after rebuilding instead.
@@ -393,9 +452,8 @@ Expected nodes include:
 ```text
 /la11_encoder_node
 /revpi_closed_loop_motor_node
+/extra_dof/extra_dof_action_server
 ```
-
-The ActionServer node may appear under the configured namespace.
 
 ### RevPi topics
 
@@ -427,19 +485,13 @@ Action servers: 1
 ### Recent ActionServer logs
 
 ```bash
-sudo journalctl \
-  -u extra-dof-action-server.service \
-  -n 50 \
-  --no-pager
+sudo journalctl   -u extra-dof-action-server.service   -n 50   --no-pager
 ```
 
 ### Recent motor-controller logs
 
 ```bash
-sudo journalctl \
-  -u linear-motor.service \
-  -n 50 \
-  --no-pager
+sudo journalctl   -u linear-motor.service   -n 50   --no-pager
 ```
 
 ---
@@ -483,15 +535,24 @@ After changing these values, rebuild `linear_motor` and restart `linear-motor.se
 
 ## Notes on old commands
 
-The older command reference contained manual commands for:
+Older project notes contained manual commands for:
 
 1. starting the LA11 encoder container/node,
 2. starting the RevPi motor controller container/node,
-3. manually restarting Docker containers after code changes.
+3. manually restarting Docker containers after code changes,
+4. sending arbitrary millimetre targets through the Action.
 
-These are no longer part of the normal workflow because the relevant processes are managed by `systemd`.
+These are no longer part of the normal workflow.
 
-The useful parts retained from the older notes are:
+The current intended external interface is:
+
+```text
+MoveAxis Action
+    +
+preset_index = 0, 1 or 2
+```
+
+Useful maintenance commands retained from the older notes include:
 
 - ROS domain configuration
 - SSH via `RevPi160200.local`
@@ -511,7 +572,7 @@ sudo systemctl status linear-motor.service --no-pager -l
 sudo systemctl status extra-dof-action-server.service --no-pager -l
 ```
 
-On the PC:
+On the control PC:
 
 ```bash
 export ROS_DOMAIN_ID=42
@@ -523,19 +584,13 @@ ROS2CLI_NO_DAEMON=1 ros2 action info /extra_dof/move_axis
 Then test one preset:
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 1}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 1}"   --feedback
 ```
 
-and one direct position:
+Finally, test rejection:
 
 ```bash
-ros2 action send_goal \
-  /extra_dof/move_axis \
-  extra_dof_control/action/MoveAxis \
-  "{target_mm: 175.0}" \
-  --feedback
+ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 3}"   --feedback
 ```
+
+The first goal should complete normally and the invalid preset should be rejected.

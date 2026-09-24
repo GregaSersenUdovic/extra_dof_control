@@ -28,6 +28,7 @@ class AxisActionServer(Node):
             'extra_dof_action_server',
             namespace='extra_dof',
         )
+
         self.declare_parameter(
             'target_topic',
             '/revpi_closed_loop_motor_node/target_mm',
@@ -39,8 +40,6 @@ class AxisActionServer(Node):
         self.declare_parameter('tolerance_mm', 0.2)
         self.declare_parameter('move_timeout_s', 30.0)
         self.declare_parameter('feedback_timeout_s', 1.0)
-        self.declare_parameter('min_position_mm', 46.0)
-        self.declare_parameter('max_position_mm', 290.0)
 
         self.target_topic = str(
             self.get_parameter('target_topic').value
@@ -56,12 +55,6 @@ class AxisActionServer(Node):
         )
         self.feedback_timeout_s = float(
             self.get_parameter('feedback_timeout_s').value
-        )
-        self.min_position_mm = float(
-            self.get_parameter('min_position_mm').value
-        )
-        self.max_position_mm = float(
-            self.get_parameter('max_position_mm').value
         )
 
         self.current_position_mm = None
@@ -103,11 +96,11 @@ class AxisActionServer(Node):
         )
 
         self.get_logger().info(
-            f'Extra DOF Action Server ready. '
-            f'Range: {self.min_position_mm:.1f}-'
-            f'{self.max_position_mm:.1f} mm, '
-            f'tolerance: {self.tolerance_mm:.2f} mm. '
-            f'Preset indices: 0, 1, 2.'
+            'Extra DOF Action Server ready. '
+            'Valid presets: 0, 1, 2. '
+            f'Target topic: {self.target_topic}. '
+            f'Position topic: {self.position_topic}. '
+            f'Tolerance: {self.tolerance_mm:.2f} mm.'
         )
 
     def position_callback(self, msg):
@@ -127,12 +120,6 @@ class AxisActionServer(Node):
             self.target_pub.publish(
                 Float64(data=float(position))
             )
-
-    @staticmethod
-    def preset_index(value):
-        if value in (0.0, 1.0, 2.0):
-            return int(value)
-        return None
 
     def get_preset_target(self, preset_index):
         if not self.preset_client.wait_for_service(
@@ -168,23 +155,12 @@ class AxisActionServer(Node):
         return float(response.values[0].double_value)
 
     def goal_callback(self, goal_request):
-        requested = float(goal_request.target_mm)
+        preset_index = int(goal_request.preset_index)
 
-        is_preset = self.preset_index(requested) is not None
-
-        if (
-            not is_preset
-            and not (
-                self.min_position_mm
-                <= requested
-                <= self.max_position_mm
-            )
-        ):
+        if preset_index not in (0, 1, 2):
             self.get_logger().error(
-                f'Rejecting target {requested:.3f}. '
-                f'Use preset index 0, 1, 2 or a position '
-                f'between {self.min_position_mm:.3f} and '
-                f'{self.max_position_mm:.3f} mm.'
+                f'Rejecting invalid preset {preset_index}. '
+                'Allowed presets: 0, 1, 2.'
             )
             return GoalResponse.REJECT
 
@@ -207,41 +183,38 @@ class AxisActionServer(Node):
         return CancelResponse.ACCEPT
 
     def execute_callback(self, goal_handle):
-        requested = float(
-            goal_handle.request.target_mm
+        preset_index = int(
+            goal_handle.request.preset_index
         )
 
         result = MoveAxis.Result()
 
         try:
-            preset = self.preset_index(requested)
+            target_mm = self.get_preset_target(
+                preset_index
+            )
 
-            if preset is not None:
-                target_mm = self.get_preset_target(preset)
+            if target_mm is None:
+                position, _ = self.get_position_state()
 
-                if target_mm is None:
-                    position, _ = self.get_position_state()
-
-                    result.success = False
-                    result.final_position_mm = (
-                        position
-                        if position is not None
-                        else float('nan')
-                    )
-                    result.message = (
-                        f'Could not read preset_{preset} '
-                        f'from motor controller.'
-                    )
-
-                    goal_handle.abort()
-                    return result
-
-                self.get_logger().info(
-                    f'Preset {preset} resolved to '
-                    f'{target_mm:.3f} mm.'
+                result.success = False
+                result.final_position_mm = (
+                    position
+                    if position is not None
+                    else float('nan')
                 )
-            else:
-                target_mm = requested
+                result.message = (
+                    f'Could not read preset_{preset_index} '
+                    'from motor controller.'
+                )
+
+                goal_handle.abort()
+                return result
+
+            self.get_logger().info(
+                f'Preset {preset_index} resolved to '
+                f'{target_mm:.3f} mm.'
+            )
 
             if self.target_pub.get_subscription_count() == 0:
                 position, _ = self.get_position_state()
@@ -297,7 +270,8 @@ class AxisActionServer(Node):
             )
 
             self.get_logger().info(
-                f'Axis target sent: {target_mm:.3f} mm'
+                f'Preset {preset_index} target sent: '
+                f'{target_mm:.3f} mm'
             )
 
             start_time = time.monotonic()
@@ -355,16 +329,13 @@ class AxisActionServer(Node):
                 if stable_samples >= 5:
                     result.success = True
                     result.final_position_mm = position
-
-                    if preset is not None:
-                        result.message = (
-                            f'Preset {preset} reached.'
-                        )
-                    else:
-                        result.message = 'Target reached.'
+                    result.message = (
+                        f'Preset {preset_index} reached.'
+                    )
 
                     self.get_logger().info(
-                        f'Axis reached {position:.3f} mm '
+                        f'Preset {preset_index} reached at '
+                        f'{position:.3f} mm '
                         f'(error {error_mm:+.3f} mm).'
                     )
 
@@ -400,7 +371,7 @@ def main(args=None):
     node = AxisActionServer()
 
     executor = MultiThreadedExecutor(
-        num_threads=2
+        num_threads=3
     )
     executor.add_node(node)
 

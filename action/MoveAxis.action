@@ -1,4 +1,4 @@
-float64 target_mm
+uint8 preset_index
 ---
 bool success
 float64 final_position_mm
