@@ -38,7 +38,7 @@ class AxisActionServer(Node):
             '/revpi_closed_loop_motor_node/position_mm',
         )
         self.declare_parameter('tolerance_mm', 0.2)
-        self.declare_parameter('move_timeout_s', 30.0)
+        self.declare_parameter('move_timeout_s', 45.0)
         self.declare_parameter('feedback_timeout_s', 1.0)
 
         self.target_topic = str(
