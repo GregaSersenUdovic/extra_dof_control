@@ -13,100 +13,204 @@ The system uses:
 - A closed-loop motor node on the RevPi
 - A ROS 2 ActionServer exposed as `/extra_dof/move_axis`
 
-The RevPi motor controller and ActionServer are configured to start automatically through `systemd`. The LA11 encoder node on the Raspberry Pi is also intended to start automatically.
+The RevPi motor controller and ActionServer are configured to start automatically through `systemd`. The LA11 encoder node on the Raspberry Pi also starts automatically through `systemd`.
 
 ---
 
 ## ROS 2 network
 
-Current ROS domain:
+The deployed system uses the default ROS 2 domain:
 
 ```bash
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
+ROS_DOMAIN_ID=0
 ```
 
-All ROS 2 devices participating in this system must use the same `ROS_DOMAIN_ID`.
+On the Digitop control PC, `ROS_DOMAIN_ID` may remain unset because ROS 2 defaults to domain 0.
+
+All ROS 2 devices participating in the extra-DOF system must use domain 0.
 
 ### RevPi ROS domain configuration
 
-The RevPi startup scripts currently containing the domain setting are:
+The RevPi runtime startup scripts explicitly set domain 0:
 
 ```text
-/home/pi/ros2_ws/start_extra_dof_action_server.sh
 /home/pi/ros2_ws/start_linear_motor.sh
+/home/pi/ros2_ws/start_extra_dof_action_server.sh
 ```
 
-After changing the domain ID, restart:
+Both scripts contain:
+
+```bash
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+```
+
+After changing ROS or network settings, restart the RevPi services:
 
 ```bash
 sudo systemctl restart linear-motor.service
 sudo systemctl restart extra-dof-action-server.service
 ```
 
+#### Existing container note
+
+The existing `ros2-linear-motor` Docker container was originally created with `ROS_DOMAIN_ID=42` in its stored Docker environment. The running motor node and ActionServer are nevertheless on domain 0 because their startup scripts explicitly override the container value.
+
+Interactive/login shells inside the container have also been configured to use domain 0. If the container is recreated in the future, it should preferably be created with `ROS_DOMAIN_ID=0` or with `ROS_DOMAIN_ID` unset.
+
 ### Raspberry Pi ROS domain configuration
 
-The Raspberry Pi encoder startup script is:
+The Raspberry Pi LA11 encoder runs on the default ROS domain 0.
+
+Its startup script inside `my-ros2-container` is:
 
 ```text
 /ros2_ws/start_la11_encoder.sh
 ```
 
-The handover notes currently reference the following service:
+The service used to start it is:
 
-```bash
-sudo systemctl restart la11-encoder.service
+```text
+la11-encoder.service
 ```
 
-If that service name differs on the Raspberry Pi, verify it with:
+Check or restart it with:
 
 ```bash
-systemctl list-units --type=service | grep -Ei 'la11|encoder'
+sudo systemctl status la11-encoder.service --no-pager
+sudo systemctl restart la11-encoder.service
 ```
 
 ---
 
 ## Network layout
 
-The RevPi PC-facing Ethernet interface uses DHCP, so its IP address may change when connected to another computer or network.
+Current deployment:
 
-For SSH, use mDNS where available:
-
-```bash
-ssh pi@RevPi160200.local
+```text
+Digitop control PC
+  enp12s0: 192.169.255.77/24
+        |
+        | Ethernet switch
+        |
+RevPi
+  physical Port A / Socket A (eth0): 192.169.255.160/24
+  physical Port B / Socket B (eth1): 192.168.50.1/24
+        |
+        | Dedicated RevPi-Raspberry Pi link
+        |
+Raspberry Pi
+  192.168.50.2/24
 ```
 
-The Raspberry Pi is connected to the RevPi through a separate internal network and normally does not need to be accessed directly from the control PC.
+On the RevPi Connect 4 running the current Bookworm-based system, physical **Port/Socket A corresponds to `eth0`** and is the control-PC/switch connection. Physical **Port/Socket B corresponds to `eth1`** and is used for the dedicated Raspberry Pi link.
+
+The Raspberry Pi is connected to the RevPi through the separate `192.168.50.0/24` network and publishes LA11 encoder feedback on:
+
+```text
+/la11_encoder_node/position_mm
+```
+
+The RevPi receives this feedback and uses it for closed-loop motor control.
+
+
+### Raspberry Pi LA11 SPI connection
+
+The LA11 encoder node uses Raspberry Pi **SPI bus 0, chip-select 0** (`/dev/spidev0.0`). The corresponding 40-pin header signals are:
+
+| LA11 SPI signal | Raspberry Pi function | BCM GPIO | Physical pin |
+|---|---|---:|---:|
+| Clock / SCK | SPI0 SCLK | GPIO11 | 23 |
+| Data / MISO | SPI0 MISO | GPIO9 | 21 |
+| Chip select / CS | SPI0 CE0 | GPIO8 | 24 |
+| MOSI | SPI0 MOSI | GPIO10 | 19 |
+
+The LA11 SPI readout uses clock, chip-select and MISO/data. MOSI is part of the Raspberry Pi SPI0 interface but is not required by the LA11 SPI output itself.
+
+A common signal ground is also required. The exact encoder supply wiring is intentionally not specified here because it depends on the installed LA11 electrical/output variant and the existing interface hardware. Raspberry Pi GPIO is **3.3 V logic only**; verify the LA11 signal-level variant before making a direct GPIO connection.
+
+The software-side SPI selection can be confirmed in the encoder node by the equivalent of:
+
+```python
+spi.open(0, 0)
+```
+
+which selects SPI0 with CE0.
+
+### SSH aliases on the Digitop
+
+A convenient Digitop SSH configuration is:
+
+```text
+Host revpi
+    HostName 192.169.255.160
+    User pi
+
+Host raspberrypi
+    HostName 192.168.50.2
+    User pi
+    ProxyJump revpi
+```
+
+This allows:
+
+```bash
+ssh revpi
+ssh raspberrypi
+```
+
+### After changing the RevPi network interface or IP address
+
+If the RevPi IP address is changed or the device is moved to another switch/interface, basic `ping` and SSH may work while ROS 2 discovery still uses information from when the DDS participants were started.
+
+Restart the RevPi ROS services after such a network change:
+
+```bash
+sudo systemctl restart linear-motor.service
+sudo systemctl restart extra-dof-action-server.service
+```
 
 ---
 
 ## Automatic startup
 
-The following components should start automatically:
+The following components should start automatically.
+
+### RevPi
 
 ```text
-RevPi:
-- linear-motor.service
-- extra-dof-action-server.service
-
-Raspberry Pi:
-- LA11 encoder service
+linear-motor.service
+extra-dof-action-server.service
 ```
 
-Because of this, manual Docker/node startup commands are normally **not needed during normal operation**.
-
-To check service status on the RevPi:
+Check their status:
 
 ```bash
 sudo systemctl status linear-motor.service --no-pager -l
 sudo systemctl status extra-dof-action-server.service --no-pager -l
 ```
 
+### Raspberry Pi
+
+```text
+la11-encoder.service
+```
+
+Check its status:
+
+```bash
+sudo systemctl status la11-encoder.service --no-pager -l
+```
+
+Manual Docker/node startup commands are normally **not needed during normal operation**.
+
 ---
 
 ## Main ROS interfaces
 
 ### Action
+
+Action name:
 
 ```text
 /extra_dof/move_axis
@@ -183,7 +287,7 @@ LA11 encoder feedback
 Action feedback/result
 ```
 
-The closed-loop motor node still contains its own minimum and maximum target limits for low-level motor safety:
+The closed-loop motor node contains minimum and maximum target limits for low-level motor safety:
 
 ```text
 min_target_mm = 46.0
@@ -194,59 +298,107 @@ These limits are not part of the public Action command interface because the Act
 
 ---
 
-## Quick PC setup
+## Quick control-PC setup
 
-On the control PC:
+On the Digitop control PC, source ROS 2 and the local workspace before using the custom Action interface:
 
 ```bash
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
+source /opt/ros/humble/setup.bash
+source ~/Desktop/ros_ws/install/setup.bash
 ```
 
-Check that the ActionServer is visible:
+The workspace overlay is required because it provides the locally built package and generated Action interface:
+
+```text
+extra_dof_control/action/MoveAxis
+extra_dof_py
+```
+
+Without sourcing the workspace, ROS discovery may still show the remote RevPi nodes, but the control PC will not know the custom Action type. A typical CLI symptom is:
+
+```text
+The passed action type is invalid
+```
+
+Check the relevant nodes:
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 action info /extra_dof/move_axis
+ros2 node list --no-daemon --spin-time 3
+```
+
+Expected RevPi nodes include:
+
+```text
+/extra_dof/extra_dof_action_server
+/revpi_closed_loop_motor_node
+```
+
+Check the Action and type:
+
+```bash
+ros2 action list -t
 ```
 
 Expected:
 
 ```text
-Action servers: 1
+/extra_dof/move_axis [extra_dof_control/action/MoveAxis]
 ```
 
-You can also list actions:
+You can also inspect the Action server with:
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 action list -t
+ros2 action info /extra_dof/move_axis
 ```
 
 ---
 
 ## Action tests
 
+The command-line tests in this section can be run directly from the **JupyterLab terminal** on the Digitop. JupyterLab should first be started from a shell where ROS 2 and the Digitop workspace overlay have been sourced, as described in the [Jupyter example](#jupyter-example). Terminals opened from that JupyterLab session inherit the same ROS environment.
+
+For notebook-based checks, use the existing **`test_extradof_paket.ipynb`** notebook. It can be used to verify the generated `MoveAxis` interface, import and instantiate `AxisClient`, and send preset goals through `/extra_dof/move_axis`. Restart the notebook kernel before a clean test run so that only one `AxisClient` instance is active.
+
+Only run movement tests when the extra axis is clear and safe to move.
+
 ### Preset 0
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 0}"   --feedback
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 0}" \
+  --feedback
 ```
 
 ### Preset 1
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 1}"   --feedback
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 1}" \
+  --feedback
 ```
 
 ### Preset 2
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 2}"   --feedback
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 2}" \
+  --feedback
 ```
 
 ### Invalid preset rejection test
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 3}"   --feedback
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 3}" \
+  --feedback
 ```
 
 The goal should be rejected and the motor should not move.
@@ -289,7 +441,9 @@ The preferred PC-side position topic is:
 Monitor it with:
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 topic echo   /revpi_closed_loop_motor_node/position_mm   --qos-reliability best_effort
+ros2 topic echo \
+  /revpi_closed_loop_motor_node/position_mm \
+  --qos-reliability best_effort
 ```
 
 The raw LA11 encoder topic is:
@@ -298,7 +452,19 @@ The raw LA11 encoder topic is:
 /la11_encoder_node/position_mm
 ```
 
-The Raspberry Pi is on a separate network behind the RevPi, so the raw encoder topic may not always be directly discoverable from the control PC.
+The Raspberry Pi is on a separate network behind the RevPi, so the raw encoder topic may not always be directly discoverable from the control PC. It should be visible from the RevPi on ROS domain 0.
+
+To test it from the RevPi container:
+
+```bash
+docker exec ros2-linear-motor bash -lc '
+source /opt/ros/humble/setup.bash
+source /ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+ros2 topic echo /la11_encoder_node/position_mm --once
+'
+```
 
 ---
 
@@ -335,8 +501,45 @@ The ActionClient sends commands to:
 
 The ActionServer runs on the RevPi.
 
----
+### Jupyter example
 
+The existing **`test_extradof_paket.ipynb`** notebook is the preferred quick test notebook for the extra-DOF package. It can be used for import checks, `AxisClient` creation, and preset goal tests. Command-line diagnostics and `ros2 action send_goal` tests can be run from the terminal built into the same JupyterLab session.
+
+Jupyter must be started from a shell in which ROS 2 and the workspace overlay have already been sourced.
+
+On the Digitop:
+
+```bash
+cd ~/Desktop/ros_ws/src
+source .venv/bin/activate
+source /opt/ros/humble/setup.bash
+source ~/Desktop/ros_ws/install/setup.bash
+jupyter-lab --allow-root
+```
+
+Then in the notebook:
+
+```python
+import rclpy
+from extra_dof_control.action import MoveAxis
+from extra_dof_py.axis_client import AxisClient
+
+if not rclpy.ok():
+    rclpy.init()
+
+axis = AxisClient()
+```
+
+Example move:
+
+```python
+success = axis.send_goal(1)
+print("Action result:", success)
+```
+
+Avoid creating multiple `AxisClient` instances in the same notebook session unless required, because they currently use the same ROS node name. If duplicate `/extra_dof_action_client` nodes appear, restart the notebook kernel and create the client once.
+
+---
 
 ## Important: deploying ActionServer changes to the RevPi
 
@@ -395,13 +598,15 @@ If the Action definition changes, rebuild `extra_dof_control` on **both devices*
 
 ### Action package
 
-Inside the ROS 2 workspace:
+Inside a ROS 2 workspace:
 
 ```bash
 cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
 
-colcon build   --packages-select extra_dof_control   --symlink-install
+colcon build \
+  --packages-select extra_dof_control \
+  --symlink-install
 
 source install/setup.bash
 ```
@@ -422,7 +627,9 @@ Inside the RevPi ROS 2 container:
 cd /ros2_ws
 source /opt/ros/humble/setup.bash
 
-colcon build   --packages-select linear_motor   --symlink-install
+colcon build \
+  --packages-select linear_motor \
+  --symlink-install
 
 source install/setup.bash
 ```
@@ -444,7 +651,7 @@ A full Docker container restart is normally unnecessary. Restart the relevant `s
 Inside the RevPi ROS 2 environment:
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 node list
+ros2 node list --no-daemon --spin-time 3
 ```
 
 Expected nodes include:
@@ -458,7 +665,7 @@ Expected nodes include:
 ### RevPi topics
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 topic list | grep -E 'revpi|la11'
+ros2 topic list | grep -E 'revpi|la11'
 ```
 
 Expected topics include:
@@ -473,7 +680,7 @@ Expected topics include:
 ### ActionServer
 
 ```bash
-ROS2CLI_NO_DAEMON=1 ros2 action info /extra_dof/move_axis
+ros2 action info /extra_dof/move_axis
 ```
 
 Expected:
@@ -485,13 +692,28 @@ Action servers: 1
 ### Recent ActionServer logs
 
 ```bash
-sudo journalctl   -u extra-dof-action-server.service   -n 50   --no-pager
+sudo journalctl \
+  -u extra-dof-action-server.service \
+  -n 50 \
+  --no-pager
 ```
 
 ### Recent motor-controller logs
 
 ```bash
-sudo journalctl   -u linear-motor.service   -n 50   --no-pager
+sudo journalctl \
+  -u linear-motor.service \
+  -n 50 \
+  --no-pager
+```
+
+### Raspberry Pi encoder logs
+
+```bash
+sudo journalctl \
+  -u la11-encoder.service \
+  -n 50 \
+  --no-pager
 ```
 
 ---
@@ -540,7 +762,8 @@ Older project notes contained manual commands for:
 1. starting the LA11 encoder container/node,
 2. starting the RevPi motor controller container/node,
 3. manually restarting Docker containers after code changes,
-4. sending arbitrary millimetre targets through the Action.
+4. sending arbitrary millimetre targets through the Action,
+5. using ROS domain 42.
 
 These are no longer part of the normal workflow.
 
@@ -552,10 +775,11 @@ MoveAxis Action
 preset_index = 0, 1 or 2
 ```
 
+The current deployed ROS domain is 0.
+
 Useful maintenance commands retained from the older notes include:
 
-- ROS domain configuration
-- SSH via `RevPi160200.local`
+- SSH access to the RevPi and Raspberry Pi
 - live encoder/position monitoring
 - `colcon build --symlink-install`
 - service restart commands
@@ -565,32 +789,64 @@ Useful maintenance commands retained from the older notes include:
 
 ## Recommended quick verification after changes
 
-On the RevPi:
+### 1. Check RevPi services
 
 ```bash
 sudo systemctl status linear-motor.service --no-pager -l
 sudo systemctl status extra-dof-action-server.service --no-pager -l
 ```
 
-On the control PC:
+### 2. Check the Raspberry Pi encoder service if encoder feedback is missing
 
 ```bash
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
-
-ROS2CLI_NO_DAEMON=1 ros2 action info /extra_dof/move_axis
+sudo systemctl status la11-encoder.service --no-pager -l
 ```
 
-Then test one preset:
+### 3. On the Digitop, source the workspace
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 1}"   --feedback
+source /opt/ros/humble/setup.bash
+source ~/Desktop/ros_ws/install/setup.bash
 ```
 
-Finally, test rejection:
+### 4. Check ROS discovery
 
 ```bash
-ros2 action send_goal   /extra_dof/move_axis   extra_dof_control/action/MoveAxis   "{preset_index: 3}"   --feedback
+ros2 node list --no-daemon --spin-time 3
+ros2 action list -t
+```
+
+Expected RevPi nodes:
+
+```text
+/extra_dof/extra_dof_action_server
+/revpi_closed_loop_motor_node
+```
+
+Expected Action:
+
+```text
+/extra_dof/move_axis [extra_dof_control/action/MoveAxis]
+```
+
+### 5. Test one preset
+
+```bash
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 1}" \
+  --feedback
+```
+
+### 6. Test invalid-preset rejection
+
+```bash
+ros2 action send_goal \
+  /extra_dof/move_axis \
+  extra_dof_control/action/MoveAxis \
+  "{preset_index: 3}" \
+  --feedback
 ```
 
 The first goal should complete normally and the invalid preset should be rejected.
